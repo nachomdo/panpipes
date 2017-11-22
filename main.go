@@ -2,110 +2,51 @@ package main
 
 import (
 	"bufio"
-	"encoding/gob"
 	"fmt"
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	flag "github.com/spf13/pflag"
-	"io"
 	"log"
 	"net"
 	"os"
 	"time"
 )
 
-func openRemoteConnection(addr string) (*bufio.ReadWriter, error) {
-	log.Println("Openning connection to " + addr)
-	conn, err := net.Dial("tcp", addr)
-
-	if err != nil {
-		return nil, fmt.Errorf("Error opening a connection to %s \n", addr)
-	}
-
-	return bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)), nil
-}
-
-func restoreToKafka(config PanpipesConfig) error {
-	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": config.brokers})
-	defer producer.Close()
-
-	var f *os.File
-	if config.file == "-" {
-		f = os.Stdin
-	} else {
+func buildSourceFromConfig(config PanpipesConfig) (*bufio.ReadWriter, error) {
+	f := os.Stdin
+	if config.file != "-" {
+		var err error
 		f, err = os.Open(config.file)
-
 		if err != nil {
-			log.Fatalln("Error opening the file ", err)
+			return nil, fmt.Errorf("Error opening the file %v \n", err)
 		}
-
-		defer f.Close()
 	}
-
-	r := bufio.NewReader(f)
-
-	for {
-		var data kafka.Message
-		decoder := gob.NewDecoder(r)
-		err := decoder.Decode(&data)
-
-		if err != nil {
-			if err != io.EOF {
-				log.Println("Error decoding GOB data: ", err)
-				continue
-			} else {
-				break
-			}
-		}
-
-		data.TopicPartition = kafka.TopicPartition{Topic: &config.topic, Partition: kafka.PartitionAny}
-		producer.Produce(&data, nil)
-		log.Println("Received message ", string(data.Value))
-	}
-	producer.Flush(5000)
-	return nil
+	return bufio.NewReadWriter(bufio.NewReader(f), bufio.NewWriter(f)), nil
 }
 
-func tcpListenerToKafka(config PanpipesConfig) error {
-	listener, err := net.Listen("tcp", ":8888")
-
-	if err != nil {
-		return fmt.Errorf("Error listening on interface %s \n", err)
-	}
-
-	defer listener.Close()
-	log.Println("Listening on " + listener.Addr().String())
-
-	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": config.brokers})
-	defer producer.Close()
-
-	for {
-		conn, _ := listener.Accept()
-		go func(c net.Conn) {
-			defer c.Close()
-			rw := bufio.NewReadWriter(bufio.NewReader(c), bufio.NewWriter(c))
-			for {
-				var data kafka.Message
-				decoder := gob.NewDecoder(rw)
-				err := decoder.Decode(&data)
-
-				if err != nil {
-					if err != io.EOF {
-						log.Println("Error decoding GOB data: ", err)
-						continue
-					} else {
-						break
-					}
-				}
-
-				data.TopicPartition = kafka.TopicPartition{Topic: &config.topic, Partition: kafka.PartitionAny}
-				producer.Produce(&data, nil)
-				log.Println("Received message ", string(data.Value))
+func buildSinkFromConfig(config PanpipesConfig) (*bufio.ReadWriter, error) {
+	if config.file != "" {
+		f := os.Stdout
+		if config.file != "-" {
+			var err error
+			f, err = os.Create(config.file)
+			if err != nil {
+				return nil, fmt.Errorf("Error creating new file %v \n", err)
 			}
-		}(conn)
+		}
+		return bufio.NewReadWriter(bufio.NewReader(f), bufio.NewWriter(f)), nil
+	} else {
+		log.Println("Opening connection to " + config.connect)
+		conn, err := net.Dial("tcp", config.connect)
+
+		if err != nil {
+			return nil, fmt.Errorf("Error opening a connection to %s \n", config.connect)
+		}
+
+		return bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)), nil
 	}
 }
 
-func kafkaToChannel(config PanpipesConfig, messageForwarder func(chan kafka.Message, *bufio.ReadWriter)) {
+func buildConsumerFromConfig(config PanpipesConfig) (*kafka.Consumer, error) {
 	c, err := kafka.NewConsumer(&kafka.ConfigMap{
 		"bootstrap.servers":        config.brokers,
 		"group.id":                 time.Now().String(),
@@ -115,54 +56,22 @@ func kafkaToChannel(config PanpipesConfig, messageForwarder func(chan kafka.Mess
 	})
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create consumer %s \n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("Failed to create consumer %s \n", err)
 	}
 
 	log.Printf("Creating consumer %v \n", c)
 
 	c.SubscribeTopics([]string{config.topic}, nil)
-	defer c.Close()
+	return c, nil
+}
 
-	messagesBuffer := make(chan kafka.Message, 1000)
-
-	var rw *bufio.ReadWriter
-	if config.file != "" {
-		var f *os.File
-		if config.file == "-" {
-			f = os.Stdout
-		} else {
-			f, err = os.Create(config.file)
-
-			if err != nil {
-				log.Fatalf("Error creating new file %v \n", err)
-			}
-			defer f.Close()
-		}
-
-		rw = bufio.NewReadWriter(bufio.NewReader(f), bufio.NewWriter(f))
-	} else {
-		rw, err = openRemoteConnection(config.connect)
+func buildPredicatesFromConfig(config PanpipesConfig) []KafkaPredicate {
+	result := []KafkaPredicate{&NoOpPredicate{}}
+	if config.count > 0 {
+		result[0] = &MessageCounter{MaxCount: config.count}
 	}
 
-	if err != nil {
-		log.Fatalf("Error opening remote connection %s", err)
-	}
-
-	go messageForwarder(messagesBuffer, rw)
-
-	for {
-		ev := <-c.Events()
-		switch e := ev.(type) {
-		case *kafka.Message:
-			log.Printf("Message received %s %s \n", string(e.Value))
-			messagesBuffer <- *e
-
-		case kafka.Error:
-			fmt.Fprintf(os.Stderr, "Error reading from Kafka %v \n", e)
-			break
-		}
-	}
+	return result
 }
 
 type PanpipesConfig struct {
@@ -170,48 +79,58 @@ type PanpipesConfig struct {
 	file    string
 	brokers string
 	topic   string
-	restore string
+	listen  string
+	count   int
+	restore bool
 }
 
 func main() {
 	config := PanpipesConfig{}
 
-	flag.StringVar(&config.connect, "connect", "", "IP address to connect to. If not provided it will start in a server mode")
-	flag.StringVar(&config.file, "file", "", "File to write or read data from")
-	flag.StringVar(&config.brokers, "brokers", "localhost:9092", "A comma separated list of brokers to bootstrap from")
-	flag.StringVar(&config.topic, "topic", "", "The topic to read from or produce to")
-	flag.StringVar(&config.restore, "restore", "", "Restore mode")
-
+	flag.StringVarP(&config.listen, "listen", "l", "", "Network interface and port to listen")
+	flag.StringVarP(&config.file, "file", "f", "", "File to write or read data from")
+	flag.StringVarP(&config.brokers, "brokers", "b", "localhost:9092", "A comma separated list of brokers to bootstrap from")
+	flag.StringVarP(&config.topic, "topic", "t", "", "The topic to read from or produce to")
+	flag.BoolVarP(&config.restore, "restore", "r", false, "Indicates that we want to restore a topic from a file")
+	flag.IntVarP(&config.count, "count", "c", 0, "Number of messages to consume or restore")
+	flag.Lookup("file").NoOptDefVal = "-"
 	flag.Parse()
 
-	if config.restore != "" {
-		restoreToKafka(config)
-		os.Exit(0)
-	}
-
-	if config.connect == "" {
-		err := tcpListenerToKafka(config)
+	if config.listen != "" || config.restore {
+		producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": config.brokers})
+		defer producer.Close()
 
 		if err != nil {
-			fmt.Printf("Error starting listener %v \n", err)
+			log.Fatalf("Cannot create Kafka producer %v", err)
+		}
+
+		if config.listen != "" {
+			TCPListenerToKafka(config, producer.ProduceChannel())
+		} else {
+			rw, err := buildSourceFromConfig(config)
+
+			if err != nil {
+				log.Fatalf("Cannot open the provided source %v", err)
+			}
+
+			GobSourceToKafkaChannel(config.topic, rw.Reader, producer.ProduceChannel())
+			producer.Flush(5000)
 		}
 	} else {
-		kafkaToChannel(config, func(messageBuffer chan kafka.Message, rw *bufio.ReadWriter) {
-			for msg := range messageBuffer {
-				encoder := gob.NewEncoder(rw)
-				err := encoder.Encode(msg)
+		config.connect = os.Args[len(os.Args)-1]
+		c, err := buildConsumerFromConfig(config)
+		defer c.Close()
 
-				if err != nil {
-					log.Println("Error encoding kafka.Messsage", err)
-				}
+		if err != nil {
+			log.Fatal(err)
+		}
 
-				err = rw.Flush()
+		rw, err := buildSinkFromConfig(config)
 
-				if err != nil {
-					log.Println("Flush failed", err)
-				}
+		if err != nil {
+			log.Fatal(err)
+		}
 
-			}
-		})
+		KafkaChannelToGobSink(c.Events(), rw, buildPredicatesFromConfig(config))
 	}
 }
