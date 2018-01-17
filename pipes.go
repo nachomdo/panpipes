@@ -45,14 +45,14 @@ func GobSourceToKafkaChannel(topic string, r *bufio.Reader, producerChannel chan
 			}
 		}
 
-		data.TopicPartition = kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny}
+		// data.TopicPartition = kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny}
 		producerChannel <- &data
 	}
 }
 
 func displayProgresInfo(info <-chan kafka.TopicPartition) {
 	var metadata kafka.TopicPartition
-	ticker := time.Tick(time.Second * 3)
+	ticker := time.Tick(time.Second * 15)
 
 loop:
 	for {
