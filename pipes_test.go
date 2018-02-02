@@ -3,11 +3,12 @@ package main
 import (
 	"bufio"
 	"encoding/gob"
-	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"io"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
 func TestKafkaChannelToGobSink(t *testing.T) {
@@ -72,10 +73,12 @@ func TestKafkaChannelToGobSinkWithPredicates(t *testing.T) {
 	}
 }
 
-func TestGobSourceKafkaChannel(t *testing.T) {
+// When source and destination topic is the same
+func TestGobSourceKafkaChannelSameTopic(t *testing.T) {
 	pr, pw := io.Pipe()
 	rw := bufio.NewReadWriter(bufio.NewReader(pr), bufio.NewWriter(pw))
 	messages := make(chan *kafka.Message)
+
 	topic := "my-topic"
 	msg := kafka.Message{TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: 0},
 		Value: []byte("This is the payload"), Key: []byte("This is the key")}
@@ -91,9 +94,42 @@ func TestGobSourceKafkaChannel(t *testing.T) {
 	rw.Flush()
 
 	result := <-messages
+
 	if string(result.Value) != string(msg.Value) {
 		t.Errorf("Produced message does not match the original %s", result.Value)
 	}
+}
+
+// When source and destination topic are different
+func TestGobSourceKafkaChannelDifferentTopic(t *testing.T) {
+	pr, pw := io.Pipe()
+	rw := bufio.NewReadWriter(bufio.NewReader(pr), bufio.NewWriter(pw))
+	messages := make(chan *kafka.Message)
+
+	topic := "my-topic"
+	msg := kafka.Message{TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: 0},
+		Value: []byte("This is the payload"), Key: []byte("This is the key")}
+
+	encoder := gob.NewEncoder(rw)
+	err := encoder.Encode(msg)
+
+	if err != nil {
+		t.Errorf("Cannot encode message %s", err)
+	}
+
+	go GobSourceToKafkaChannel("another-topic", rw.Reader, messages)
+	rw.Flush()
+
+	result := <-messages
+
+	if string(result.Value) != string(msg.Value) {
+		t.Errorf("Produced message does not match the original %s", result.Value)
+	}
+
+	if topic == *result.TopicPartition.Topic {
+		t.Errorf("Source topic %v has not been overwritten by the target topic", *result.TopicPartition.Topic)
+	}
+
 }
 
 func TestRoundTrip(t *testing.T) {

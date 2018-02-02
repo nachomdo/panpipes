@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"encoding/gob"
 	"fmt"
-	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"io"
 	"log"
 	"net"
 	"os"
 	"time"
+
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
 func TCPListenerToKafka(config PanpipesConfig, producerChannel chan<- *kafka.Message) error {
@@ -45,7 +46,11 @@ func GobSourceToKafkaChannel(topic string, r *bufio.Reader, producerChannel chan
 			}
 		}
 
-		data.TopicPartition = kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny}
+		if topic != *data.TopicPartition.Topic {
+			data.TopicPartition = kafka.TopicPartition{
+				Topic: &topic, Partition: kafka.PartitionAny}
+		}
+
 		producerChannel <- &data
 	}
 }
@@ -63,7 +68,7 @@ loop:
 				break loop
 			}
 		case <-ticker:
-			log.Printf("Topic %s partition %v offset %v", *metadata.Topic, metadata.Partition, metadata.Offset)
+			log.Printf("Topic %v partition %v offset %v", *metadata.Topic, metadata.Partition, metadata.Offset)
 		}
 	}
 }
